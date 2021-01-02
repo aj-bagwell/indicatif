@@ -1046,6 +1046,25 @@ impl MultiProgress {
         self.join_impl(true)
     }
 
+    /// Retrieves any messages sent with `println()` after all progress bars were finished.
+    ///
+    /// You should call this after `join()` has returned if such messages are important.
+    /// Calling this at the same time as `join()` (from a different thread) will likely deadlock
+    /// your program.
+    pub fn buffered_messages(&self) -> Vec<String> {
+        self.rx
+            .try_iter()
+            .map(|msg| match msg {
+                MultiProgressDrawState::Orphans(state) => state.lines,
+                MultiProgressDrawState::Progress((_, mut state)) => {
+                    state.lines.truncate(state.orphan_lines);
+                    state.lines
+                }
+            })
+            .flatten()
+            .collect()
+    }
+
     fn is_done(&self) -> bool {
         let state = self.state.read().unwrap();
         if state.objects.is_empty() {

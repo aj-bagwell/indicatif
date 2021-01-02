@@ -114,6 +114,15 @@ fn main() {
 
     mp.join().unwrap();
 
+    // Simulate a message being added after the last progress bar finishes.
+    // buffered_messages() is intended to retrieve such messages sent from another thread
+    // (tricky to write a realistic example for).
+    mp.println("All done!");
+    mp.add(ProgressBar::new(1)).println("Yes, really!");
+    for msg in mp.buffered_messages() {
+        println!("{}", msg);
+    }
+
     println!("===============================");
     println!("the tree should be the same as:");
     for elem in tree2.lock().unwrap().iter() {
