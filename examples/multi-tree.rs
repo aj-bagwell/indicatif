@@ -75,6 +75,7 @@ fn main() {
 
     let mp2 = Arc::clone(&mp);
     let _ = thread::spawn(move || {
+        mp2.println("Getting started...");
         let mut rng = Rng::new();
         pb_main.tick();
         loop {
@@ -85,6 +86,7 @@ fn main() {
                     return;
                 }
                 Some(Action::AddProgressBar(el_idx)) => {
+                    mp2.println("Adding more bars...");
                     let elem = &ELEMENTS[el_idx];
                     let pb = mp2.insert(elem.index + 1, elem.progress_bar.clone());
                     pb.set_message(&format!("{}  {}", "  ".repeat(elem.indent), elem.key));

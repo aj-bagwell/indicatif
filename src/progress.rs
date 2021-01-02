@@ -37,7 +37,7 @@ enum Status {
 
 enum ProgressDrawTargetKind {
     Term(Term, Option<ProgressDrawState>, Option<Duration>),
-    Remote(usize, Mutex<Sender<(usize, ProgressDrawState)>>),
+    Remote(usize, Mutex<Sender<MultiProgressDrawState>>),
     Hidden,
 }
 
@@ -168,7 +168,7 @@ impl ProgressDrawTarget {
                 return chan
                     .lock()
                     .unwrap()
-                    .send((idx, draw_state))
+                    .send(MultiProgressDrawState::Progress((idx, draw_state)))
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
             }
             ProgressDrawTargetKind::Hidden => {}
@@ -183,7 +183,7 @@ impl ProgressDrawTarget {
             ProgressDrawTargetKind::Remote(idx, ref chan) => {
                 chan.lock()
                     .unwrap()
-                    .send((
+                    .send(MultiProgressDrawState::Progress((
                         idx,
                         ProgressDrawState {
                             lines: vec![],
@@ -193,7 +193,7 @@ impl ProgressDrawTarget {
                             move_cursor: false,
                             ts: Instant::now(),
                         },
-                    ))
+                    )))
                     .ok();
             }
             ProgressDrawTargetKind::Hidden => {}
@@ -895,12 +895,28 @@ struct MultiProgressState {
     move_cursor: bool,
 }
 
+/// The drawn state of orphan lines not part of a ProgressBar.
+#[derive(Debug)]
+struct OrphanDrawState {
+    /// The lines to print (can contain ANSI codes)
+    pub lines: Vec<String>,
+    /// Time when the draw state was created.
+    pub ts: Instant,
+}
+
+/// Draw states passed into MultiProgress.
+#[derive(Debug)]
+enum MultiProgressDrawState {
+    Progress((usize, ProgressDrawState)),
+    Orphans(OrphanDrawState),
+}
+
 /// Manages multiple progress bars from different threads.
 pub struct MultiProgress {
     state: RwLock<MultiProgressState>,
     joining: AtomicBool,
-    tx: Sender<(usize, ProgressDrawState)>,
-    rx: Receiver<(usize, ProgressDrawState)>,
+    tx: Sender<MultiProgressDrawState>,
+    rx: Receiver<MultiProgressDrawState>,
 }
 
 impl fmt::Debug for MultiProgress {
@@ -1003,6 +1019,19 @@ impl MultiProgress {
         pb
     }
 
+    /// Print a log line above all progress bars.
+    ///
+    /// Calling this without `join()` will deadlock your program.
+    pub fn println<I: Into<String>>(&self, msg: I) {
+        let lines: Vec<String> = msg.into().lines().map(Into::into).collect();
+        self.tx
+            .send(MultiProgressDrawState::Orphans(OrphanDrawState {
+                lines,
+                ts: Instant::now(),
+            }))
+            .ok();
+    }
+
     /// Waits for all progress bars to report that they are finished.
     ///
     /// You need to call this as this will request the draw instructions
@@ -1045,36 +1074,45 @@ impl MultiProgress {
         let mut grouped = 0usize;
         let mut orphan_lines: Vec<String> = Vec::new();
         while !self.is_done() {
-            let (idx, draw_state) = if let Some(peeked) = recv_peek.take() {
+            let msg = if let Some(peeked) = recv_peek.take() {
                 peeked
             } else {
                 self.rx.recv().unwrap()
             };
-            let ts = draw_state.ts;
-            let force_draw = draw_state.finished || draw_state.force_draw;
-
             let mut state = self.state.write().unwrap();
-            if draw_state.finished {
-                state.objects[idx].done = true;
+            let ts;
+            let mut force_draw = false;
+            match msg {
+                MultiProgressDrawState::Progress((idx, draw_state)) => {
+                    ts = draw_state.ts;
+                    force_draw = draw_state.finished || draw_state.force_draw;
+
+                    if draw_state.finished {
+                        state.objects[idx].done = true;
+                    }
+
+                    // Split orphan lines out of the draw state, if any
+                    let lines = if draw_state.orphan_lines > 0 {
+                        let split = draw_state.lines.split_at(draw_state.orphan_lines);
+                        orphan_lines.extend_from_slice(split.0);
+                        split.1.to_vec()
+                    } else {
+                        draw_state.lines
+                    };
+
+                    let draw_state = ProgressDrawState {
+                        lines,
+                        orphan_lines: 0,
+                        ..draw_state
+                    };
+
+                    state.objects[idx].draw_state = Some(draw_state);
+                }
+                MultiProgressDrawState::Orphans(orphans_state) => {
+                    ts = orphans_state.ts;
+                    orphan_lines.extend_from_slice(&orphans_state.lines);
+                }
             }
-
-            // Split orphan lines out of the draw state, if any
-            let lines = if draw_state.orphan_lines > 0 {
-                let split = draw_state.lines.split_at(draw_state.orphan_lines);
-                orphan_lines.extend_from_slice(split.0);
-                split.1.to_vec()
-            } else {
-                draw_state.lines
-            };
-
-            let draw_state = ProgressDrawState {
-                lines,
-                orphan_lines: 0,
-                ..draw_state
-            };
-
-            state.objects[idx].draw_state = Some(draw_state);
-
             // the rest from here is only drawing, we can skip it.
             if state.draw_target.is_hidden() {
                 continue;
